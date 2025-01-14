@@ -41,14 +41,12 @@ class GGCNNGraspDetector:
                 rospy.logwarn("Получено пустое глубинное изображение!")
                 return
             
-            # Нормализуем глубинное изображение и обрезаем центральную часть
+            # Нормализуем глубинное изображение
             depth_image = self.preprocess_depth_image(depth_image)
             
             # Передаём глубинное изображение в нейросеть
             self.grasp_params = self.process_with_ggcnn(depth_image)
 
-            # Выводим результаты захвата
-            # rospy.loginfo(f"Grasp Params: {self.grasp_params}")
         except CvBridgeError as e:
             rospy.logerr(f"Ошибка конвертации изображения: {e}")
         except Exception as e:
@@ -56,32 +54,17 @@ class GGCNNGraspDetector:
 
     def preprocess_depth_image(self, depth_image):
         """
-        Нормализация глубинного изображения и обрезка центральной области.
+        Нормализация глубинного изображения.
         """
         # Заменяем NaN на 0
         depth_image = np.nan_to_num(depth_image, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Обрезаем центральную часть изображения
-        height, width = depth_image.shape
-        center_x, center_y = width // 2, height // 2
-        crop_width, crop_height = 640, 360  # Обрезаем до размера 640x360
-        crop_left = center_x - crop_width // 2
-        crop_right = center_x + crop_width // 2
-        crop_top = center_y - crop_height // 2
-        crop_bottom = center_y + crop_height // 2
-
-        depth_image_cropped = depth_image[crop_top:crop_bottom, crop_left:crop_right]
-
         # Нормализуем изображение
-        min_depth = np.min(depth_image_cropped)
-        max_depth = np.max(depth_image_cropped)
-        depth_image_cropped = (depth_image_cropped - min_depth) / (max_depth - min_depth)
+        min_depth = np.min(depth_image)
+        max_depth = np.max(depth_image)
+        depth_image = (depth_image - min_depth) / (max_depth - min_depth)
 
-        # Отображение глубинного изображения для отладки
-        cv2.imshow("Cropped Depth Image", depth_image_cropped)
-        cv2.waitKey(1)  # Ждём 1 миллисекунду для обновления окна
-
-        return depth_image_cropped
+        return depth_image
 
     def process_with_ggcnn(self, depth_image):
         """
@@ -89,7 +72,7 @@ class GGCNNGraspDetector:
         """
         # Преобразуем глубинное изображение в формат тензора
         depth_tensor = torch.tensor(depth_image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
-
+        # rospy.loginfo(f"размер тензора {depth_tensor.size()}")
         # Прогон через модель
         try:
             with torch.no_grad():
@@ -98,7 +81,6 @@ class GGCNNGraspDetector:
             rospy.logerr(f"Ошибка при работе модели: {e}")
             return None
 
-        # Извлекаем каналы (предполагается, что модель возвращает 4 канала)
         q_img, angle_img, width_img, pos_img = output
 
         # Преобразуем тензоры в numpy
@@ -113,6 +95,13 @@ class GGCNNGraspDetector:
         grasp_theta = angle_img[max_q_idx]
         grasp_width = width_img[max_q_idx]
         grasp_z = pos_img[max_q_idx]
+
+        # Отображаем точку захвата на изображении
+        depth_image_colored = cv2.applyColorMap((depth_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        cv2.circle(depth_image_colored, (grasp_x, grasp_y), 5, (0, 255, 0), -1)  # Рисуем точку (зелёный круг)
+
+        cv2.imshow("Depth Image with Grasp Point", depth_image_colored)
+        cv2.waitKey(1)  # Ждём 1 миллисекунду для обновления окна
 
         return {
             "x": grasp_x,
