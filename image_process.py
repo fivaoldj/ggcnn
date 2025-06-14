@@ -10,10 +10,27 @@ class GGCNNGraspDetector:
     def __init__(self):
         # Для обработки глубинной карты будем использовать графический процессор
         self.device = torch.device("cuda")  # Используем GPU
-
+        
+        # Игнорировать предупреждения
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning)
+        
+        # Проверка CUDA
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
+        
+        # Загрузка модели
+        model_path = '../ggcnn/ggcnn_weights_cornell/ggcnn_epoch_23_cornell'
+        try:
+            self.model = torch.load(model_path, map_location=self.device)
+            self.model.eval()  # Переключить в режим оценки
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
         # Импортируем модель нейросети
         torch.nn.Module.dump_patches = True
-        self.model = torch.load('../ggcnn/ggcnn_weights_cornell/ggcnn_epoch_23_cornell')
+        
+        # self.model = torch.load('../ggcnn/ggcnn_weights_cornell/ggcnn_epoch_23_cornell')
 
         # Инициализируем CvBridge для конвертации ROS Image в OpenCV
         self.bridge = CvBridge()
@@ -66,42 +83,49 @@ class GGCNNGraspDetector:
 
         return depth_image
 
-    def process_with_ggcnn(self, depth_image):
+    def process_with_ggcnn(self, depth_image, k=40):
         """
-        Передаёт глубинную карту в нейросеть GGCNN и возвращает параметры захвата.
+        Возвращает усреднённые (x, y) и theta по k точкам с максимальным q_img.
         """
-        # Преобразуем глубинное изображение в формат тензора
+        # Преобразование в тензор
         depth_tensor = torch.tensor(depth_image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
-        # rospy.loginfo(f"размер тензора {depth_tensor.size()}")
+        
         # Прогон через модель
         try:
             with torch.no_grad():
-                output = self.model(depth_tensor)
+                q_img, angle_img, width_img, pos_img = self.model(depth_tensor)
         except Exception as e:
-            rospy.logerr(f"Ошибка при работе модели: {e}")
+            rospy.logerr(f"Ошибка модели: {e}")
             return None
 
-        q_img, angle_img, width_img, pos_img = output
-
-        # Преобразуем тензоры в numpy
+        # Конвертация в numpy
         q_img = q_img.cpu().squeeze().numpy()
         angle_img = angle_img.cpu().squeeze().numpy()
         width_img = width_img.cpu().squeeze().numpy()
         pos_img = pos_img.cpu().squeeze().numpy()
 
-        # Ищем лучшую точку захвата
-        max_q_idx = np.unravel_index(np.argmax(q_img), q_img.shape)
-        grasp_x, grasp_y = max_q_idx[1], max_q_idx[0]
-        grasp_theta = angle_img[max_q_idx]
-        grasp_width = width_img[max_q_idx]
-        grasp_z = pos_img[max_q_idx]
+        # Находим k точек с максимальным q_img
+        top_k_indices = np.argpartition(q_img.flatten(), -k)[-k:]  # Индексы топ-k значений
+        top_k_indices_2d = np.unravel_index(top_k_indices, q_img.shape)  # (y_coords, x_coords)
 
-        # Отображаем точку захвата на изображении
-        depth_image_colored = cv2.applyColorMap((depth_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        cv2.circle(depth_image_colored, (grasp_x, grasp_y), 5, (0, 255, 0), -1)  # Рисуем точку (зелёный круг)
+        # Усреднение координат
+        grasp_y = np.mean(top_k_indices_2d[0]).astype(int)  # Средний y
+        grasp_x = np.mean(top_k_indices_2d[1]).astype(int)  # Средний x
 
-        cv2.imshow("Depth Image with Grasp Point", depth_image_colored)
-        cv2.waitKey(1)  # Ждём 1 миллисекунду для обновления окна
+        # Усреднение угла theta по тем же k точкам
+        grasp_theta = np.mean(angle_img[top_k_indices_2d])
+
+        # Параметры для усреднённой точки (или можно усреднить и их)
+        grasp_width = width_img[grasp_y, grasp_x]
+        grasp_z = pos_img[grasp_y, grasp_x]
+
+        # Визуализация
+        depth_colored = cv2.applyColorMap((depth_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        cv2.circle(depth_colored, (grasp_x, grasp_y), 5, (0, 255, 0), -1)
+        cv2.imshow("Grasp Point", depth_colored)
+        cv2.imshow("Quality of grasp", q_img)
+        cv2.imshow("Angle map", angle_img)
+        cv2.waitKey(1)
 
         return {
             "x": grasp_x,
